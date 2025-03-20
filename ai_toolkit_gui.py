@@ -3,10 +3,12 @@ import sys
 import yaml
 import subprocess
 import customtkinter as ctk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, Toplevel
 import threading
 import queue
 import time
+import glob
+from PIL import Image, ImageTk
 
 # Set appearance mode and default color theme
 ctk.set_appearance_mode("System")  # Modes: system (default), light, dark
@@ -36,6 +38,8 @@ class AIToolkitGUI(ctk.CTk):
         self.saved_configs = []
         self.current_config = {}
         self.output_queue = queue.Queue()
+        self.current_samples_dir = None
+        self.image_data = {}
         
         # Create the main frame layout
         self.create_layout()
@@ -52,13 +56,20 @@ class AIToolkitGUI(ctk.CTk):
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
+        # Create a tabview for the right side
+        self.right_tabview = ctk.CTkTabview(self)
+        self.right_tabview.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+        
+        # Add tabs
+        self.terminal_tab = self.right_tabview.add("Terminal")
+        self.samples_tab = self.right_tabview.add("Samples")
+        
+        # Set default tab
+        self.right_tabview.set("Terminal")
+        
         # Left panel - Form
         self.left_panel = ctk.CTkFrame(self)
         self.left_panel.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
-        
-        # Right panel - Terminal output
-        self.right_panel = ctk.CTkFrame(self)
-        self.right_panel.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
         
         # Configure left panel
         self.left_panel.grid_columnconfigure(0, weight=1)
@@ -67,13 +78,21 @@ class AIToolkitGUI(ctk.CTk):
         # Create form elements
         self.create_form()
         
-        # Configure right panel
-        self.right_panel.grid_columnconfigure(0, weight=1)
-        self.right_panel.grid_rowconfigure(0, weight=0)
-        self.right_panel.grid_rowconfigure(1, weight=1)
+        # Configure terminal tab
+        self.terminal_tab.grid_columnconfigure(0, weight=1)
+        self.terminal_tab.grid_rowconfigure(0, weight=0)
+        self.terminal_tab.grid_rowconfigure(1, weight=1)
         
         # Create terminal section
         self.create_terminal()
+        
+        # Configure samples tab
+        self.samples_tab.grid_columnconfigure(0, weight=1)
+        self.samples_tab.grid_rowconfigure(0, weight=0)
+        self.samples_tab.grid_rowconfigure(1, weight=1)
+        
+        # Create samples section
+        self.create_samples_viewer()
 
     def create_form(self):
         # Title label
@@ -197,16 +216,238 @@ class AIToolkitGUI(ctk.CTk):
     def create_terminal(self):
         # Terminal header
         terminal_label = ctk.CTkLabel(
-            self.right_panel, 
+            self.terminal_tab, 
             text="Terminal Output", 
             font=ctk.CTkFont(size=16, weight="bold")
         )
         terminal_label.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="w")
         
         # Terminal output text area
-        self.terminal_output = ctk.CTkTextbox(self.right_panel, wrap="word")
+        self.terminal_output = ctk.CTkTextbox(self.terminal_tab, wrap="word")
         self.terminal_output.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="nsew")
         self.terminal_output.configure(state="disabled")
+
+    def create_samples_viewer(self):
+        # Samples header frame
+        samples_header_frame = ctk.CTkFrame(self.samples_tab)
+        samples_header_frame.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="ew")
+        samples_header_frame.grid_columnconfigure(0, weight=1)
+        samples_header_frame.grid_columnconfigure(1, weight=0)
+        
+        # Samples header
+        samples_label = ctk.CTkLabel(
+            samples_header_frame, 
+            text="Sample Images", 
+            font=ctk.CTkFont(size=16, weight="bold")
+        )
+        samples_label.grid(row=0, column=0, padx=0, pady=0, sticky="w")
+        
+        # Refresh button
+        refresh_button = ctk.CTkButton(
+            samples_header_frame,
+            text="Refresh",
+            width=100,
+            command=self.refresh_samples
+        )
+        refresh_button.grid(row=0, column=1, padx=0, pady=0, sticky="e")
+        
+        # Create a frame for the samples
+        self.samples_frame = ctk.CTkScrollableFrame(self.samples_tab)
+        self.samples_frame.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="nsew")
+        
+        # Initial message
+        self.no_samples_label = ctk.CTkLabel(
+            self.samples_frame,
+            text="No sample images found. Select a configuration and click 'Refresh'.",
+            font=ctk.CTkFont(size=14)
+        )
+        self.no_samples_label.pack(pady=20)
+        
+        # Initialize image containers
+        self.image_labels = []
+
+    def refresh_samples(self):
+        # Clear current images
+        for label in self.image_labels:
+            label.destroy()
+        self.image_labels = []
+        self.image_data = {}
+        
+        # Get the current configuration name
+        config_name = self.name_entry.get()
+        
+        if not config_name:
+            # If no configuration is selected, show message
+            self.no_samples_label.configure(text="No configuration selected. Please select or create a configuration.")
+            self.no_samples_label.pack(pady=20)
+            return
+            
+        # Construct the samples directory path
+        base_dir = self.training_folder_entry.get()
+        if not base_dir:
+            base_dir = "output"  # Default directory
+            
+        samples_dir = os.path.join(base_dir, config_name, "samples")
+        self.current_samples_dir = samples_dir
+        
+        # Check if directory exists
+        if not os.path.exists(samples_dir):
+            self.no_samples_label.configure(text=f"No samples directory found at: {samples_dir}")
+            self.no_samples_label.pack(pady=20)
+            return
+            
+        # Find image files
+        image_files = []
+        for ext in ["*.png", "*.jpg", "*.jpeg"]:
+            image_files.extend(glob.glob(os.path.join(samples_dir, ext)))
+            
+        # Sort by modification time (newest first)
+        image_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+        
+        if not image_files:
+            self.no_samples_label.configure(text=f"No sample images found in: {samples_dir}")
+            self.no_samples_label.pack(pady=20)
+            return
+            
+        # Hide the no samples label
+        self.no_samples_label.pack_forget()
+        
+        # Get number of prompts (for grid layout)
+        num_prompts = sum(1 for p in self.prompt_entries if p.get("0.0", "end-1c").strip())
+        num_prompts = max(1, min(5, num_prompts))  # Ensure between 1 and 5
+        
+        # Create a grid frame to hold the images
+        grid_frame = ctk.CTkFrame(self.samples_frame)
+        grid_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Configure grid columns
+        for i in range(num_prompts):
+            grid_frame.grid_columnconfigure(i, weight=1)
+        
+        # Display images in a grid
+        row, col = 0, 0
+        for i, img_path in enumerate(image_files):
+            try:
+                # Create frame for each image with caption
+                img_frame = ctk.CTkFrame(grid_frame)
+                img_frame.grid(row=row, column=col, padx=5, pady=5, sticky="nsew")
+                
+                # Load and resize image
+                img = Image.open(img_path)
+                # Store original image
+                self.image_data[img_path] = img.copy()
+                
+                # Calculate aspect ratio and resize to fit
+                width, height = img.size
+                max_width = 250  # Maximum thumbnail width
+                if width > max_width:
+                    ratio = max_width / width
+                    new_width = int(width * ratio)
+                    new_height = int(height * ratio)
+                    img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                
+                # Convert to Tkinter PhotoImage
+                tk_img = ImageTk.PhotoImage(img)
+                
+                # Image label with click handler
+                img_label = ctk.CTkLabel(img_frame, image=tk_img, text="")
+                img_label.image = tk_img  # Keep a reference to prevent garbage collection
+                img_label.bind("<Button-1>", lambda e, path=img_path: self.show_image_popup(path, self.image_data[path]))
+                img_label.pack(pady=5)
+                
+                # Caption with short filename
+                filename = os.path.basename(img_path)
+                if len(filename) > 25:  # Truncate long filenames
+                    filename = filename[:20] + "..." + filename[-5:]
+                caption_label = ctk.CTkLabel(img_frame, text=filename)
+                caption_label.pack(pady=2)
+                
+                # Add to list for later cleanup
+                self.image_labels.append(img_frame)
+                
+                # Update grid position
+                col += 1
+                if col >= num_prompts:
+                    col = 0
+                    row += 1
+                
+                # Limit to 20 images to prevent performance issues
+                if i >= 19:
+                    more_label = ctk.CTkLabel(self.samples_frame, 
+                                            text=f"+ {len(image_files) - 20} more images in {samples_dir}")
+                    more_label.pack(pady=10)
+                    self.image_labels.append(more_label)
+                    break
+                    
+            except Exception as e:
+                error_label = ctk.CTkLabel(self.samples_frame, 
+                                        text=f"Error loading {os.path.basename(img_path)}: {str(e)}")
+                error_label.pack(pady=5)
+                self.image_labels.append(error_label)
+        
+        # Add the grid frame to cleanup list
+        self.image_labels.append(grid_frame)
+    
+    def show_image_popup(self, img_path, original_img):
+        # Create popup window
+        popup = ctk.CTkToplevel(self)
+        popup.title("Image Viewer")
+        
+        # Set a reasonable size for the popup window
+        screen_width = popup.winfo_screenwidth()
+        screen_height = popup.winfo_screenheight()
+        
+        # Calculate dimensions - use up to 80% of screen but maintain aspect ratio
+        img_width, img_height = original_img.size
+        
+        max_width = int(screen_width * 0.8)
+        max_height = int(screen_height * 0.8)
+        
+        # Calculate scaled dimensions maintaining aspect ratio
+        if img_width > max_width or img_height > max_height:
+            width_ratio = max_width / img_width
+            height_ratio = max_height / img_height
+            scale_ratio = min(width_ratio, height_ratio)
+            
+            new_width = int(img_width * scale_ratio)
+            new_height = int(img_height * scale_ratio)
+        else:
+            new_width = img_width
+            new_height = img_height
+            
+        # Resize image
+        img_resized = original_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        img_tk = ImageTk.PhotoImage(img_resized)
+        
+        # Calculate window dimensions with some padding
+        window_width = new_width + 40
+        window_height = new_height + 100
+        
+        # Position the window in the center of the screen
+        x_position = (screen_width - window_width) // 2
+        y_position = (screen_height - window_height) // 2
+        
+        popup.geometry(f"{window_width}x{window_height}+{x_position}+{y_position}")
+        
+        # Create label for the image
+        img_label = ctk.CTkLabel(popup, image=img_tk, text="")
+        img_label.image = img_tk  # Keep reference to prevent garbage collection
+        img_label.pack(pady=10, padx=10)
+        
+        # Add filename label
+        filename_label = ctk.CTkLabel(popup, text=os.path.basename(img_path))
+        filename_label.pack(pady=5)
+        
+        # Add close button
+        close_button = ctk.CTkButton(popup, text="Close", command=popup.destroy)
+        close_button.pack(pady=10)
+        
+        # Make the popup modal
+        popup.transient(self)
+        popup.grab_set()
+        
+        # Wait for the window to be closed
+        self.wait_window(popup)
 
     def load_saved_configs(self):
         config_dir = os.path.join(os.getcwd(), "config")
@@ -235,6 +476,10 @@ class AIToolkitGUI(ctk.CTk):
                 
             # Extract values from YAML and populate form
             self.populate_form(config_data)
+            
+            # Check for samples after loading a configuration
+            self.right_tabview.set("Samples")
+            self.refresh_samples()
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load configuration: {str(e)}")
@@ -474,6 +719,9 @@ class AIToolkitGUI(ctk.CTk):
             self.load_saved_configs()
             self.saved_config_dropdown.set(filename)
             
+            # Check for samples directory and refresh if needed
+            self.refresh_samples()
+            
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save configuration: {str(e)}")
 
@@ -505,6 +753,9 @@ class AIToolkitGUI(ctk.CTk):
             # Add terminal output
             self.log_to_terminal(f"Starting training with configuration: {config_filename}\n")
             self.log_to_terminal("Activating virtual environment...\n")
+            
+            # Switch to Terminal tab to show output
+            self.right_tabview.set("Terminal")
             
             # Create and use a batch file to run the training
             batch_file = "launch-trainer.bat"
